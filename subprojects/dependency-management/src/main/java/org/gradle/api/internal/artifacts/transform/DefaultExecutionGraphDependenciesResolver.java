@@ -16,6 +16,7 @@
 
 package org.gradle.api.internal.artifacts.transform;
 
+import org.gradle.api.Project;
 import org.gradle.api.artifacts.component.ComponentIdentifier;
 import org.gradle.api.artifacts.component.ProjectComponentIdentifier;
 import org.gradle.api.artifacts.result.DependencyResult;
@@ -23,7 +24,11 @@ import org.gradle.api.artifacts.result.ResolvedComponentResult;
 import org.gradle.api.artifacts.result.ResolvedDependencyResult;
 import org.gradle.api.file.FileCollection;
 import org.gradle.api.internal.artifacts.ResolverResults;
+import org.gradle.api.internal.attributes.ImmutableAttributes;
+import org.gradle.api.internal.file.FileCollectionInternal;
+import org.gradle.api.internal.tasks.NodeExecutionContext;
 import org.gradle.api.internal.tasks.TaskDependencyContainer;
+import org.gradle.api.internal.tasks.TaskDependencyResolveContext;
 import org.gradle.api.internal.tasks.WorkNodeAction;
 import org.gradle.internal.Factory;
 import org.gradle.internal.Try;
@@ -68,11 +73,16 @@ public class DefaultExecutionGraphDependenciesResolver implements ExecutionGraph
         if (!transformer.requiresDependencies()) {
             return MISSING_DEPENDENCIES.getFiles();
         }
+        ImmutableAttributes fromAttributes = transformer.getFromAttributes();
+        return selectedArtifacts(fromAttributes);
+    }
+
+    private FileCollectionInternal selectedArtifacts(ImmutableAttributes fromAttributes) {
         ResolverResults results = artifactResults.create();
         if (dependencies == null) {
             dependencies = computeDependencies(componentIdentifier, ComponentIdentifier.class, results.getResolutionResult().getAllComponents(), false);
         }
-        return filteredResultFactory.resultsMatching(transformer.getFromAttributes(), element -> dependencies.contains(element));
+        return filteredResultFactory.resultsMatching(fromAttributes, element -> dependencies.contains(element));
     }
 
     @Override
@@ -81,7 +91,7 @@ public class DefaultExecutionGraphDependenciesResolver implements ExecutionGraph
             return Try.successful(MISSING_DEPENDENCIES);
         }
         try {
-            FileCollection files = selectedArtifacts(transformer);
+            FileCollection files = selectedArtifacts(transformer.getFromAttributes());
             // Trigger resolution failure
             files.getFiles();
             return Try.successful(new DefaultArtifactTransformDependencies(files));
@@ -98,10 +108,27 @@ public class DefaultExecutionGraphDependenciesResolver implements ExecutionGraph
         return context -> {
             ResolverResults results = graphResults.create();
             if (buildDependencies == null) {
-                buildDependencies = computeDependencies(componentIdentifier, ProjectComponentIdentifier.class, results.getResolutionResult().getAllComponents(), true);
+                buildDependencies = computeDependencies(componentIdentifier, ComponentIdentifier.class, results.getResolutionResult().getAllComponents(), true);
             }
-            context.add(filteredResultFactory.resultsMatching(transformationStep.getFromAttributes(), element -> buildDependencies.contains(element)));
-            context.add(graphResolveAction);
+            FileCollectionInternal files = filteredResultFactory.resultsMatching(transformationStep.getFromAttributes(), element -> buildDependencies.contains(element));
+            context.add(files);
+            context.add(new WorkNodeAction() {
+                @Override
+                public Project getProject() {
+                    return graphResolveAction.getProject();
+                }
+
+                @Override
+                public void visitDependencies(TaskDependencyResolveContext context) {
+                    context.add(files);
+                    context.add(graphResolveAction);
+                }
+
+                @Override
+                public void run(NodeExecutionContext context) {
+                    selectedArtifacts(transformationStep.getFromAttributes()).getFiles();
+                }
+            });
         };
     }
 
