@@ -380,6 +380,13 @@ project(':common') {
         outputContains("transform local a.jar using [test-1.2.jar.external]")
         outputContains("transform local test-1.2.jar.external using []")
         outputContains("result = [a.jar.local, test-1.2.jar.external.local]")
+
+        when:
+        run(":resolve")
+
+        then:
+        outputDoesNotContain("transform")
+        outputContains("result = [a.jar.local, test-1.2.jar.external.local]")
     }
 
     def "transform with changed set of dependencies are re-executed"() {

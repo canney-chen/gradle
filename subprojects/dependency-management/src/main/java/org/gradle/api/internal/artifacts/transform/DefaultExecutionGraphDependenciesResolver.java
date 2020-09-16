@@ -18,7 +18,6 @@ package org.gradle.api.internal.artifacts.transform;
 
 import org.gradle.api.Project;
 import org.gradle.api.artifacts.component.ComponentIdentifier;
-import org.gradle.api.artifacts.component.ProjectComponentIdentifier;
 import org.gradle.api.artifacts.result.DependencyResult;
 import org.gradle.api.artifacts.result.ResolvedComponentResult;
 import org.gradle.api.artifacts.result.ResolvedDependencyResult;
@@ -57,7 +56,6 @@ public class DefaultExecutionGraphDependenciesResolver implements ExecutionGraph
     private final Factory<ResolverResults> artifactResults;
     private final WorkNodeAction graphResolveAction;
     private final FilteredResultFactory filteredResultFactory;
-    private Set<ComponentIdentifier> buildDependencies;
     private Set<ComponentIdentifier> dependencies;
 
     public DefaultExecutionGraphDependenciesResolver(ComponentIdentifier componentIdentifier, Factory<ResolverResults> graphResults, Factory<ResolverResults> artifactResults, WorkNodeAction graphResolveAction, FilteredResultFactory filteredResultFactory) {
@@ -73,8 +71,26 @@ public class DefaultExecutionGraphDependenciesResolver implements ExecutionGraph
         if (!transformer.requiresDependencies()) {
             return MISSING_DEPENDENCIES.getFiles();
         }
-        ImmutableAttributes fromAttributes = transformer.getFromAttributes();
-        return selectedArtifacts(fromAttributes);
+        return selectedArtifacts(transformer.getFromAttributes());
+    }
+
+    @Override
+    public Try<ArtifactTransformDependencies> computeArtifacts(Transformer transformer) {
+        if (!transformer.requiresDependencies()) {
+            return Try.successful(MISSING_DEPENDENCIES);
+        }
+        return resolvedArtifacts(transformer.getFromAttributes());
+    }
+
+    private Try<ArtifactTransformDependencies> resolvedArtifacts(ImmutableAttributes fromAttributes) {
+        try {
+            FileCollection files = selectedArtifacts(fromAttributes);
+            // Trigger resolution, including any failures
+            files.getFiles();
+            return Try.successful(new DefaultArtifactTransformDependencies(files));
+        } catch (Exception e) {
+            return Try.failure(e);
+        }
     }
 
     private FileCollectionInternal selectedArtifacts(ImmutableAttributes fromAttributes) {
@@ -86,49 +102,15 @@ public class DefaultExecutionGraphDependenciesResolver implements ExecutionGraph
     }
 
     @Override
-    public Try<ArtifactTransformDependencies> computeArtifacts(Transformer transformer) {
-        if (!transformer.requiresDependencies()) {
-            return Try.successful(MISSING_DEPENDENCIES);
-        }
-        try {
-            FileCollection files = selectedArtifacts(transformer.getFromAttributes());
-            // Trigger resolution failure
-            files.getFiles();
-            return Try.successful(new DefaultArtifactTransformDependencies(files));
-        } catch (Exception e) {
-            return Try.failure(e);
-        }
-    }
-
-    @Override
     public TaskDependencyContainer computeDependencyNodes(TransformationStep transformationStep) {
         if (!transformationStep.requiresDependencies()) {
             return TaskDependencyContainer.EMPTY;
         }
         return context -> {
             ResolverResults results = graphResults.create();
-            if (buildDependencies == null) {
-                buildDependencies = computeDependencies(componentIdentifier, ComponentIdentifier.class, results.getResolutionResult().getAllComponents(), true);
-            }
+            Set<ComponentIdentifier> buildDependencies = computeDependencies(componentIdentifier, ComponentIdentifier.class, results.getResolutionResult().getAllComponents(), true);
             FileCollectionInternal files = filteredResultFactory.resultsMatching(transformationStep.getFromAttributes(), element -> buildDependencies.contains(element));
-            context.add(files);
-            context.add(new WorkNodeAction() {
-                @Override
-                public Project getProject() {
-                    return graphResolveAction.getProject();
-                }
-
-                @Override
-                public void visitDependencies(TaskDependencyResolveContext context) {
-                    context.add(files);
-                    context.add(graphResolveAction);
-                }
-
-                @Override
-                public void run(NodeExecutionContext context) {
-                    selectedArtifacts(transformationStep.getFromAttributes()).getFiles();
-                }
-            });
+            context.add(new FinalizeTransformDependencies(files, transformationStep));
         };
     }
 
@@ -168,4 +150,28 @@ public class DefaultExecutionGraphDependenciesResolver implements ExecutionGraph
         }
     }
 
+    public class FinalizeTransformDependencies implements WorkNodeAction {
+        private final FileCollectionInternal files;
+        private final TransformationStep transformationStep;
+
+        public FinalizeTransformDependencies(FileCollectionInternal files, TransformationStep transformationStep) {
+            this.files = files;
+            this.transformationStep = transformationStep;
+        }
+
+        @Override
+        public Project getProject() {
+            return graphResolveAction.getProject();
+        }
+
+        @Override
+        public void visitDependencies(TaskDependencyResolveContext context) {
+            context.add(files);
+        }
+
+        @Override
+        public void run(NodeExecutionContext context) {
+            resolvedArtifacts(transformationStep.getFromAttributes());
+        }
+    }
 }
